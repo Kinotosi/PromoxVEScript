@@ -287,16 +287,28 @@ function advanced_settings() {
     exit-script
   fi
 
-  if CI_PASS=$(whiptail --backtitle "Proxmox VE Helper Scripts" --passwordbox "Set Cloud-Init Password (leave blank for a random one)" 8 58 --title "PASSWORD" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
-    if [ -z "$CI_PASS" ]; then
-      CI_PASS=$(openssl rand -hex 8)
-      echo -e "${DGN}Using Cloud-Init Password: ${BGN}$CI_PASS${CL} (generated)"
+  while true; do
+    if CI_PASS=$(whiptail --backtitle "Proxmox VE Helper Scripts" --passwordbox "Set Cloud-Init Password (leave blank for a random one)" 8 58 --title "PASSWORD" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+      if [ -z "$CI_PASS" ]; then
+        CI_PASS=$(openssl rand -hex 8)
+        echo -e "${DGN}Using Cloud-Init Password: ${BGN}$CI_PASS${CL} (generated)"
+        break
+      fi
+      if CI_PASS2=$(whiptail --backtitle "Proxmox VE Helper Scripts" --passwordbox "Confirm Cloud-Init Password" 8 58 --title "CONFIRM PASSWORD" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+        if [ "$CI_PASS" = "$CI_PASS2" ]; then
+          echo -e "${DGN}Using Cloud-Init Password: ${BGN}********${CL}"
+          break
+        fi
+        echo -e "${CROSS}${RD} Passwords do not match, try again${CL}"
+        sleep 2
+        continue
+      else
+        exit-script
+      fi
     else
-      echo -e "${DGN}Using Cloud-Init Password: ${BGN}********${CL}"
+      exit-script
     fi
-  else
-    exit-script
-  fi
+  done
 
   if DISK_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Disk Size (e.g. 2G, 20G)" 8 58 2G --title "DISK SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
     if [[ ! "$DISK_SIZE" =~ ^[1-9][0-9]*[GM]$ ]]; then
@@ -504,6 +516,12 @@ qm set $VMID \
 
   <a href='https://ko-fi.com/D1D7EP4GF'><img src='https://img.shields.io/badge/&#x2615;-Buy me a coffee-blue' /></a>
   </div>" >/dev/null
+msg_info "Setting disk size to ${DISK_SIZE}"
+if qm resize $VMID scsi0 ${DISK_SIZE} 1>&/dev/null 2>&1; then
+  msg_ok "Disk size set to ${DISK_SIZE}"
+else
+  msg_ok "Disk kept at the image size (${DISK_SIZE} is not larger than the imported image)"
+fi
 msg_ok "Created a Ubuntu 22.04 VM ${CL}${BL}(${HN})"
 if [ "$START_VM" == "yes" ]; then
   msg_info "Starting Ubuntu 22.04 VM"
