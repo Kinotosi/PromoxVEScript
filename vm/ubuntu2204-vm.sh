@@ -110,6 +110,17 @@ function arch_check() {
   fi
 }
 
+function is_ipv4() {
+  local ip=$1 octet
+  [[ $ip =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || return 1
+  for octet in ${ip//./ }; do (( octet <= 255 )) || return 1; done
+}
+
+function is_cidr() {
+  local prefix=${1##*/}
+  [[ $1 == */?* ]] && [[ $prefix =~ ^[0-9]{1,2}$ ]] && (( prefix >= 8 && prefix <= 32 )) && is_ipv4 "${1%/*}"
+}
+
 function ssh_check() {
   if command -v pveversion >/dev/null 2>&1; then
     if [ -n "${SSH_CLIENT:+x}" ]; then
@@ -138,6 +149,11 @@ function default_settings() {
   CPU_TYPE=""
   CORE_COUNT="2"
   RAM_SIZE="2048"
+  CI_USER="ubuntu"
+  CI_PASS=$(openssl rand -hex 8)
+  DISK_SIZE="2G"
+  IPCONF="ip=dhcp"
+  DNS="1.1.1.1"
   BRG="vmbr0"
   MAC="$GEN_MAC"
   VLAN=""
@@ -150,6 +166,11 @@ function default_settings() {
   echo -e "${DGN}Using CPU Model: ${BGN}KVM64${CL}"
   echo -e "${DGN}Allocated Cores: ${BGN}${CORE_COUNT}${CL}"
   echo -e "${DGN}Allocated RAM: ${BGN}${RAM_SIZE}${CL}"
+  echo -e "${DGN}Using Cloud-Init User: ${BGN}${CI_USER}${CL}"
+  echo -e "${DGN}Using Cloud-Init Password: ${BGN}${CI_PASS}${CL}"
+  echo -e "${DGN}Using Disk Size: ${BGN}${DISK_SIZE}${CL}"
+  echo -e "${DGN}Using Network: ${BGN}DHCP${CL}"
+  echo -e "${DGN}Using Nameserver: ${BGN}${DNS}${CL}"
   echo -e "${DGN}Using Bridge: ${BGN}${BRG}${CL}"
   echo -e "${DGN}Using MAC Address: ${BGN}${MAC}${CL}"
   echo -e "${DGN}Using VLAN: ${BGN}Default${CL}"
@@ -253,6 +274,68 @@ function advanced_settings() {
     else
       echo -e "${DGN}Allocated RAM: ${BGN}$RAM_SIZE${CL}"
     fi
+  else
+    exit-script
+  fi
+
+  if CI_USER=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Cloud-Init Username" 8 58 ubuntu --title "USERNAME" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+    if [ -z "$CI_USER" ]; then
+      CI_USER="ubuntu"
+    fi
+    echo -e "${DGN}Using Cloud-Init User: ${BGN}$CI_USER${CL}"
+  else
+    exit-script
+  fi
+
+  if CI_PASS=$(whiptail --backtitle "Proxmox VE Helper Scripts" --passwordbox "Set Cloud-Init Password (leave blank for a random one)" 8 58 --title "PASSWORD" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+    if [ -z "$CI_PASS" ]; then
+      CI_PASS=$(openssl rand -hex 8)
+      echo -e "${DGN}Using Cloud-Init Password: ${BGN}$CI_PASS${CL} (generated)"
+    else
+      echo -e "${DGN}Using Cloud-Init Password: ${BGN}********${CL}"
+    fi
+  else
+    exit-script
+  fi
+
+  if DISK_SIZE=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set Disk Size (e.g. 2G, 20G)" 8 58 2G --title "DISK SIZE" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+    if [[ ! "$DISK_SIZE" =~ ^[1-9][0-9]*[GM]$ ]]; then
+      echo -e "${CROSS}${RD} Invalid size '$DISK_SIZE', using 2G${CL}"
+      DISK_SIZE="2G"
+    fi
+    echo -e "${DGN}Using Disk Size: ${BGN}$DISK_SIZE${CL}"
+  else
+    exit-script
+  fi
+
+  if NET=$(whiptail --backtitle "Proxmox VE Helper Scripts" --title "NETWORK" --radiolist "Choose IPv4 configuration" --cancel-button Exit-Script 10 58 2 \
+    "dhcp" "DHCP - automatic (Default)" ON \
+    "static" "Static IP" OFF \
+    3>&1 1>&2 2>&3); then
+    if [ "$NET" = "static" ]; then
+      IPADDR=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set IPv4 address with prefix, e.g. 192.168.1.50/24" 8 58 --title "IP ADDRESS" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+      GW=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set gateway, e.g. 192.168.1.1" 8 58 --title "GATEWAY" --cancel-button Exit-Script 3>&1 1>&2 2>&3) || exit-script
+      if is_cidr "$IPADDR" && is_ipv4 "$GW"; then
+        IPCONF="ip=${IPADDR},gw=${GW}"
+        echo -e "${DGN}Using Network: ${BGN}Static ${IPADDR} via ${GW}${CL}"
+      else
+        IPCONF="ip=dhcp"
+        echo -e "${CROSS}${RD} Invalid address '$IPADDR' / gateway '$GW', falling back to DHCP${CL}"
+      fi
+    else
+      IPCONF="ip=dhcp"
+      echo -e "${DGN}Using Network: ${BGN}DHCP${CL}"
+    fi
+  else
+    exit-script
+  fi
+
+  if DNS=$(whiptail --backtitle "Proxmox VE Helper Scripts" --inputbox "Set nameserver" 8 58 1.1.1.1 --title "NAMESERVER" --cancel-button Exit-Script 3>&1 1>&2 2>&3); then
+    if ! is_ipv4 "$DNS"; then
+      DNS="1.1.1.1"
+      echo -e "${CROSS}${RD} Invalid nameserver, using 1.1.1.1${CL}"
+    fi
+    echo -e "${DGN}Using Nameserver: ${BGN}$DNS${CL}"
   else
     exit-script
   fi
@@ -407,8 +490,12 @@ pvesm alloc $STORAGE $VMID $DISK0 4M 1>&/dev/null
 qm importdisk $VMID ${FILE} $STORAGE ${DISK_IMPORT:-} 1>&/dev/null
 qm set $VMID \
   -efidisk0 ${DISK0_REF}${FORMAT} \
-  -scsi0 ${DISK1_REF},${DISK_CACHE}${THIN}size=2G \
+  -scsi0 ${DISK1_REF},${DISK_CACHE}${THIN}size=${DISK_SIZE} \
   -ide2 ${STORAGE}:cloudinit \
+  -ciuser ${CI_USER} \
+  -cipassword ${CI_PASS} \
+  -ipconfig0 ${IPCONF} \
+  -nameserver ${DNS} \
   -boot order=scsi0 \
   -serial0 socket \
   -description "<div align='center'><a href='https://Helper-Scripts.com'><img src='https://raw.githubusercontent.com/tteck/Proxmox/main/misc/images/logo-81x112.png'/></a>
@@ -424,5 +511,6 @@ if [ "$START_VM" == "yes" ]; then
   msg_ok "Started Ubuntu 22.04 VM"
 fi
 msg_ok "Completed Successfully!\n"
-echo -e "Setup Cloud-Init before starting \n
+echo -e "Cloud-Init login: ${BGN}${CI_USER}${CL} / ${BGN}${CI_PASS}${CL}"
+echo -e "Disk Size: ${BGN}${DISK_SIZE}${CL} — grow later with: qm resize ${VMID} scsi0 +10G\n
 More info at https://github.com/tteck/Proxmox/discussions/2072 \n"
